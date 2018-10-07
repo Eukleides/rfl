@@ -1,186 +1,121 @@
-import os
+import gym
 import numpy as np
-import matplotlib.pyplot as plt
-import cv2
-import random
-from tqdm import tqdm
+import tensorflow as tf
+from keras.utils import to_categorical
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.models import load_model
 
+gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.7)
+sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+###################################
 
-from keras.layers import Input
-from keras.models import Model, Sequential
-from keras.layers.core import Dense, Dropout
-from keras.layers.advanced_activations import LeakyReLU
-from keras.datasets import mnist
-from keras.optimizers import Adam
-from keras import initializers
+seed = 7
+np.random.seed(seed)
+env = gym.make("CartPole-v0")
+env.reset()
 
-# Let Keras know that we are using tensorflow as our backend engine
-os.environ["KERAS_BACKEND"] = "tensorflow"
+def play_a_game(model=None, render=False, verbose=False):
+    # initialise
+    total_reward = 0.
+    observation = env.reset()
 
-# To make sure that we can reproduce the experiment and get the same results
-np.random.seed(10)
+    # holders to record observations, actions
+    obs_hist = []
+    act_hist = []
 
-# The dimension of our random noise vector.
-RANDOM_DIM = 500
-DATADIR = "Data/PetImages"
-CATEGORIES = ["Dog"]
-IMG_SIZE = 150
+    done = False
 
-def create_training_data():
-    training_data = []
+    # this is each frame, up to 200...but we wont make it that far.
+    while not done:
+        # This will display the environment
+        # Only display if you really want to see it.
+        # Takes much longer to display it.
+        if render:
+            env.render()
 
-    for category in CATEGORIES:  # do dogs and cats
+        # add observation to history
+        obs_hist.append(observation)
 
-        path = os.path.join(DATADIR,category)  # create path to dogs and cats
-        class_num = CATEGORIES.index(category)  # get the classification  (0 or a 1). 0=dog 1=cat
+        # This will just create a sample action in any environment.
+        # In this environment, the action can be 0 or 1, which is left or right
+        if model is None:
+            action = env.action_space.sample()
+        else:
+            # imply action from the model
+            np_obs = observation.reshape(1,-1)
+            action_oh = model.predict(np_obs)
+            action = np.argmax(action_oh)
 
-        for img in tqdm(os.listdir(path)):  # iterate over each image per dogs and cats
-            try:
-                img_array = cv2.imread(os.path.join(path,img) ,cv2.IMREAD_GRAYSCALE)  # convert to array
-                new_array = cv2.resize(img_array, (IMG_SIZE, IMG_SIZE))  # resize to normalize data size
-                # normalize our inputs to be in the range[-1, 1]
-                new_array1 = (new_array.astype(np.float32) - 127.5) / 127.5
-                new_array1 = new_array1.reshape(IMG_SIZE*IMG_SIZE)
+        # this executes the environment with an action,
+        # and returns the observation of the environment,
+        # the reward, if the env is over, and other info.
+        observation, reward, done, info = env.step(action)
 
-                training_data.append(new_array1)
-            except Exception as e:  # in the interest in keeping the output clean...
-                pass
+        total_reward += reward
 
-    random.shuffle(training_data)
+        # add action to history
+        act_hist.append([action])
 
-    ntest = int(0.9*len(training_data))
-    x_train = training_data[0:ntest]
-    x_test = training_data[ntest:]
-    return (x_train, x_test)
+        if done:
+            break
 
-# You will use the Adam optimizer
-def get_optimizer():
-    return Adam(lr=0.0002, beta_1=0.5)
+    if verbose:
+        print('Total Reward: ' + '{:.0f}'.format(total_reward))
 
-def get_generator(optimizer):
-    generator = Sequential()
-    generator.add(Dense(256, input_dim=RANDOM_DIM, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
-    generator.add(LeakyReLU(0.2))
+    obs_hist = np.array(obs_hist, dtype=float)
+    act_hist = np.array(act_hist, dtype=float)
+    act_hist.reshape(act_hist.size,1)
+    return total_reward, obs_hist, act_hist
 
-    generator.add(Dense(512))
-    generator.add(LeakyReLU(0.2))
+def get_some_winning_games(ngames, min_score):
 
-    generator.add(Dense(1024))
-    generator.add(LeakyReLU(0.2))
+    nrec = 0
+    obs_hist = np.array([])
+    act_hist = np.array([])
 
-    generator.add(Dense(IMG_SIZE*IMG_SIZE, activation='tanh'))
-    generator.compile(loss='binary_crossentropy', optimizer=optimizer)
-    return generator
+    while(nrec<ngames):
+        reward, obs_i, act_i = play_a_game()
 
-def get_discriminator(optimizer):
-    discriminator = Sequential()
-    discriminator.add(Dense(1024, input_dim=IMG_SIZE*IMG_SIZE, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
-    discriminator.add(LeakyReLU(0.2))
-    discriminator.add(Dropout(0.3))
+        if reward >= min_score:
+            # this was a good game, store it
+            if obs_hist.size==0:
+                obs_hist = obs_i
+                act_hist = act_i
+            else:
+                obs_hist = np.vstack((obs_hist, obs_i))
+                act_hist = np.vstack((act_hist, act_i))
+            nrec += 1
 
-    discriminator.add(Dense(512))
-    discriminator.add(LeakyReLU(0.2))
-    discriminator.add(Dropout(0.3))
+    # one hot encode
+    act_hist_oh = to_categorical(act_hist)
 
-    discriminator.add(Dense(256))
-    discriminator.add(LeakyReLU(0.2))
-    discriminator.add(Dropout(0.3))
+    return obs_hist, act_hist_oh
 
-    discriminator.add(Dense(1, activation='sigmoid'))
-    discriminator.compile(loss='binary_crossentropy', optimizer=optimizer)
-    return discriminator
+def train_model(obs_hist, act_hist):
+    # create model
+    model = Sequential()
+    model.add(Dense(64, input_dim=4, activation='relu'))
+    model.add(Dense(48, activation='relu'))
+    model.add(Dense(2, activation='softmax'))
 
-def get_gan_network(discriminator, in_dim, generator, optimizer):
-    # We initially set trainable to False since we only want to train either the
-    # generator or discriminator at a time
-    discriminator.trainable = False
-    # gan input (noise) will be 100-dimensional vectors
-    gan_input = Input(shape=(in_dim,))
-    # the output of the generator (an image)
-    x = generator(gan_input)
-    # get the output of the discriminator (probability if the image is real or not)
-    gan_output = discriminator(x)
-    gan = Model(inputs=gan_input, outputs=gan_output)
-    gan.compile(loss='binary_crossentropy', optimizer=optimizer)
-    return gan
+    # Compile model
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
 
-# Create a wall of generated MNIST images
-def plot_generated_images(epoch, generator, examples=4, dim=(2, 2), figsize=(10, 10)):
-    noise = np.random.normal(0, 1, size=[examples, RANDOM_DIM])
-    generated_images = generator.predict(noise)
-    generated_images = generated_images.reshape(examples, IMG_SIZE, IMG_SIZE)
+    # Fit the model
+    model.fit(obs_hist, act_hist, epochs=250, batch_size=10)
 
-    plt.figure(figsize=figsize)
-    for i in range(generated_images.shape[0]):
-        plt.subplot(dim[0], dim[1], i+1)
-        plt.imshow(generated_images[i], interpolation='nearest', cmap='gray_r')
-        plt.axis('off')
-    plt.tight_layout()
-    plt.savefig('results/gan_generated_image_epoch_%d.png' % epoch)
-    plt.show()
+    # save the trained model
+    model.save('my_model.h5')
 
-def plot_generated_images2(examples=4, dim=(2, 2), figsize=(10, 10)):
-    from keras.models import load_model
-    generator = load_model('results\generator_model_215')
+    return model
 
-    noise = np.random.normal(0, 1, size=[examples, RANDOM_DIM])
-    generated_images = generator.predict(noise)
-    generated_images = generated_images.reshape(examples, IMG_SIZE, IMG_SIZE)
+# obs_hist, act_hist = get_some_winning_games(ngames=10, min_score=50.)
+# model = train_model(obs_hist=obs_hist, act_hist=act_hist)
+#
+model = load_model('my_model.h5')
+# for _ in range(10):
+#     obs_hist, act_hist = get_some_winning_games(ngames=10, min_score=50.)
+#     model = train_model(obs_hist=obs_hist, act_hist=act_hist)
 
-    plt.figure(figsize=figsize)
-    for i in range(generated_images.shape[0]):
-        plt.subplot(dim[0], dim[1], i+1)
-        plt.imshow(generated_images[i], interpolation='nearest', cmap='gray_r')
-        plt.axis('off')
-    plt.tight_layout()
-    plt.show()
-
-def plot_image(X, n):
-    img = X[n].reshape(IMG_SIZE, IMG_SIZE)
-    plt.imshow(img, cmap='gray')  # graph it
-
-def train(epochs=1, batch_size=128):
-    # Get the training and testing data
-    x_train, x_test = create_training_data()
-    # Split the training data into batches of size 128
-    batch_count = int(len(x_train) / batch_size)
-
-    # Build our GAN netowrk
-    adam = get_optimizer()
-    generator = get_generator(adam)
-    discriminator = get_discriminator(adam)
-    gan = get_gan_network(discriminator, RANDOM_DIM, generator, adam)
-
-    for e in range(1, epochs + 1):
-        print('-' * 15, 'Epoch %d' % e, '-' * 15)
-        for _ in tqdm(range(batch_count)):
-            # Get a random set of input noise and images
-            noise = np.random.normal(0, 1, size=[batch_size, RANDOM_DIM])
-            image_batch = np.array(random.sample(x_train, batch_size))
-
-            # Generate fake images
-            generated_images = generator.predict(noise)
-            X = np.concatenate([image_batch, generated_images])
-
-            # Labels for generated and real data
-            y_dis = np.zeros(2 * batch_size)
-            # One-sided label smoothing
-            y_dis[:batch_size] = 0.9
-
-            # Train discriminator
-            discriminator.trainable = True
-            discriminator.train_on_batch(X, y_dis)
-
-            # Train generator
-            noise = np.random.normal(0, 1, size=[batch_size, RANDOM_DIM])
-            y_gen = np.ones(batch_size)
-            discriminator.trainable = False
-            gan.train_on_batch(noise, y_gen)
-
-        if e == 1 or e % 5 == 0:
-            #plot_generated_images(e, generator)
-            generator.save('results/generator_model_%d' % e)
-
-if __name__ == '__main__':
-    #train(1000, 128)
-    plot_generated_images2()
+play_a_game(model=model, render=True, verbose=True)
