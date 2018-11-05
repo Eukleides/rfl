@@ -11,8 +11,8 @@ from keras.layers import Dense, Flatten, Dropout, Input, multiply
 from tqdm import tqdm
 from replay_buffer import ReplayBuffer
 
-gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.1)
-sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+# gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.1)
+# sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 ###################################
 
@@ -92,6 +92,10 @@ def greedy_action(env, model, observation):
     return action
 
 def epsilon_greedy_action(env, model, observation, epsilon):
+
+    if env.isOpponentsTurn():
+        opp = True
+
     if random.random() < epsilon:
         action = env.getValidRandomAction()
     else:
@@ -126,13 +130,12 @@ def evaluate(env, model, view=False, numGames=100):
             elif is_ai_player is False:
                 episode_lose_return_sum += reward
 
+            if view:
+                env.render()
+                # time.sleep(1.0)
+
             obs = env.reset()
             episode += 1
-
-            if view:
-                time.sleep(10)
-
-        env.render()
 
         action = epsilon_greedy_action(env, model, obs, epsilon=EVAL_EPSILON)
         obs, reward, done, player = env.step(action)
@@ -145,26 +148,33 @@ def evaluate(env, model, view=False, numGames=100):
     return avg_win_return, avg_lose_return
 
 def train(env, model, max_steps, name):
+
     target_model = create_model(env)
     replay = ReplayBuffer(REPLAY_BUFFER_SIZE)
     done = True
     episode = 0
     steps_after_logging = 0
     loss = 0.0
+
     for step in range(1, max_steps + 1):
         try:
             if step % SNAPSHOT_EVERY == 0:
                 save_model(model, step, name)
+
             if done:
+
                 if episode > 0:
+
                     if steps_after_logging >= LOG_EVERY:
+
                         steps_after_logging = 0
-                        episode_end = time()
+                        episode_end = time.time()
                         episode_seconds = episode_end - episode_start
                         episode_steps = step - episode_start_step
                         steps_per_second = episode_steps / episode_seconds
                         memory = psutil.virtual_memory()
                         to_gb = lambda in_bytes: in_bytes / 1024 / 1024 / 1024
+
                         print(
                             "episode {} "
                             "steps {}/{} "
@@ -183,12 +193,14 @@ def train(env, model, max_steps, name):
                                 to_gb(memory.used),
                                 to_gb(memory.total),
                             ))
+
                 # env.render()
-                episode_start = time()
+                episode_start = time.time()
                 episode_start_step = step
                 obs = env.reset()
                 episode += 1
                 episode_return = 0.0
+
             else:
                 obs = next_obs
 
@@ -202,8 +214,7 @@ def train(env, model, max_steps, name):
                     target_model.set_weights(model.get_weights())
                 batch = replay.sample(BATCH_SIZE)
                 loss = fit_batch(env, model, target_model, batch)
-            if step == Q_VALIDATION_SIZE:
-                q_validation_observations, _, _, _, _, _ = replay.sample(Q_VALIDATION_SIZE)
+
             if step >= TRAIN_START and step % EVAL_EVERY == 0:
                 avg_win_return, avg_lose_return = evaluate(env, model)
 
@@ -212,11 +223,12 @@ def train(env, model, max_steps, name):
                         avg_win_return,
                         avg_lose_return
                         ))
+
             steps_after_logging += 1
+
         except KeyboardInterrupt:
             save_model(model, step, name)
             break
-
 
 def load_or_create_model(env, model_filename):
     if model_filename:
@@ -242,7 +254,7 @@ def main(play=False, model_name=None):
 
     if play:
         episode_win_return_sum, episode_lose_return_sum = evaluate(env, model, view=True, numGames=50)
-        print("Episodes {:.1f} Wins:{:.1f} Loses:{:.1f}".format(episode, episode_win_return_sum, episode_lose_return_sum))
+        print("Wins:{:.1f} Loses:{:.1f}".format(episode_win_return_sum, episode_lose_return_sum))
         env.close()
     else:
         max_steps = 120000
@@ -251,29 +263,5 @@ def main(play=False, model_name=None):
             filename = save_model(model, EVAL_STEPS, name='test')
             load_or_create_model(env, filename)
 
-main(play=True, model_name='model-50000.h5')
+main(play=False, model_name=None)
 
-
-# def test():
-#
-#     input_tensor = Input(shape=(5, 2))
-#     action_mask = Input(shape=(4,))
-#
-#     f1 = Flatten()(input_tensor)
-#     x1 = Dense(4)(f1)
-#     x2 = Dense(4)(x1)
-#     x3 = multiply([x2, action_mask])
-#
-#     model = Model(inputs=[input_tensor, action_mask], outputs=[x3])
-#     optimizer = keras.optimizers.Adam(lr=LEARNING_RATE, clipnorm=1.0)
-#     model.compile(optimizer, loss='mean_squared_error')
-#
-#     xin = np.ones((1, 5, 2))
-#     afilt = np.zeros((1,4))
-#     afilt[0][2] = 1.0
-#
-#     y = model.predict(x=[xin, afilt])
-#     print(y)
-#     print(model.summary())
-#
-#     return model

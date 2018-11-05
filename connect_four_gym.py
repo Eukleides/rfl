@@ -45,8 +45,8 @@ class FooEnv(gym.Env):
             validAction = self.actionIsValid(action)
         return action
 
-    def getPlayer(self):
-        return self.turn
+    def isOpponentsTurn(self):
+        return (self.turn == self.metadata['OPPONENT'])
 
     def step(self, action):
         assert(self.actionIsValid(action))
