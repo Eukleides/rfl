@@ -7,6 +7,7 @@ from gym.utils import seeding
 class FooEnv(gym.Env):
     metadata = {
                 'render.modes': ['human'],
+                'MAX_REWARD': 100.,
                 'state_types': [0, 1, 2],
                 'AI PLAYER': 1, # ai player
                 'OPPONENT': 2  # opponent player
@@ -59,11 +60,8 @@ class FooEnv(gym.Env):
         self.gridCounterHeights[action] -= 1
 
         if done:
-            if self.turn == 1:
-                reward = 100.
-            else:
-                reward = -100.
-
+            # the game was won
+            reward = 100.
 
         if (done is False) and self.checkDraw():
             return self.flatten_state(np.array(self.state)), 0.0, True, {}
@@ -151,7 +149,7 @@ class FooEnv(gym.Env):
 
         self.DISPLAYSURF.blit(self.DISPLAYSURF, (0, 0))
 
-        pygame.time.delay(1)
+        # pygame.time.delay(1)
         pygame.display.update()
 
         # buttonPress=False

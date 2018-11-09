@@ -6,19 +6,22 @@ import numpy as np
 import psutil
 import tensorflow as tf
 import keras
-from keras.models import Sequential, Model
-from keras.layers import Dense, Flatten, Dropout, Input, multiply
-from tqdm import tqdm
+from keras.models import Model
+from keras.layers import Dense, Flatten, Input, multiply
 from replay_buffer import ReplayBuffer
+GPU_VERSION = False
 
-# gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.1)
-# sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+###################################
+if GPU_VERSION:
+    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.1)
+    sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 ###################################
 
 DISCOUNT_FACTOR_GAMMA = 0.99
 LEARNING_RATE = 0.001
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 TARGET_UPDATE_EVERY = 1000
 TRAIN_START = 2000
 REPLAY_BUFFER_SIZE = 50000
@@ -30,7 +33,6 @@ EVAL_STEPS = 100
 EVAL_EPSILON = 0
 TRAIN_EPSILON = 0.01
 Q_VALIDATION_SIZE = 10000
-
 
 def one_hot_encode(n, action):
     one_hot = np.zeros(n)
@@ -45,10 +47,10 @@ def fit_batch(env, model, target_model, batch):
     observations, actions, rewards, next_observations, dones, players = batch
     # Predict the Q values of the next states. Passing ones as the action mask.
     next_q_values = predict(env, target_model, next_observations)
-    # The Q values of terminal states is 0 by definition.
+    # The next Q values of terminal states are 0 by definition.
     next_q_values[dones] = 0.0
     # The Q values of each start state is the reward + gamma * the max next state Q value
-    q_values = rewards + DISCOUNT_FACTOR_GAMMA * np.max(next_q_values, axis=1)
+    q_values = rewards - DISCOUNT_FACTOR_GAMMA * np.max(next_q_values, axis=1)
     one_hot_actions = np.array([one_hot_encode(env.action_space.n, action) for action in actions])
     history = model.fit(
         x=[observations, one_hot_actions],
@@ -91,17 +93,17 @@ def greedy_action(env, model, observation):
     action = np.argmax(next_q_values)
     return action
 
-def epsilon_greedy_action(env, model, observation, epsilon):
+def epsilon_greedy_action(env, model, opponentModel, observation, epsilon):
 
     if env.isOpponentsTurn():
-        opp = True
+        action = greedy_action(env, opponentModel, observation)
+        return action
 
     if random.random() < epsilon:
         action = env.getValidRandomAction()
     else:
         action = greedy_action(env, model, observation)
     return action
-
 
 def save_model(model, step, name):
     if name is None:
@@ -111,7 +113,7 @@ def save_model(model, step, name):
     print('Saved {}'.format(filename))
     return filename
 
-def evaluate(env, model, view=False, numGames=100):
+def evaluate(env, model, opponentModel=None, view=False, numGames=100):
 
     print("Evaluation")
     done = False
@@ -132,12 +134,12 @@ def evaluate(env, model, view=False, numGames=100):
 
             if view:
                 env.render()
-                # time.sleep(1.0)
+                time.sleep(1.0)
 
             obs = env.reset()
             episode += 1
 
-        action = epsilon_greedy_action(env, model, obs, epsilon=EVAL_EPSILON)
+        action = epsilon_greedy_action(env, model, opponentModel, obs, epsilon=EVAL_EPSILON)
         obs, reward, done, player = env.step(action)
         is_ai_player = (player == env.metadata['AI PLAYER'])
 
@@ -147,7 +149,7 @@ def evaluate(env, model, view=False, numGames=100):
 
     return avg_win_return, avg_lose_return
 
-def train(env, model, max_steps, name):
+def train(env, model, opponentModel, max_steps, name):
 
     target_model = create_model(env)
     replay = ReplayBuffer(REPLAY_BUFFER_SIZE)
@@ -204,25 +206,30 @@ def train(env, model, max_steps, name):
             else:
                 obs = next_obs
 
-            action = epsilon_greedy_action(env, model, obs, epsilon=TRAIN_EPSILON)
+            action = epsilon_greedy_action(env, model, opponentModel, obs, epsilon=TRAIN_EPSILON)
             next_obs, reward, done, player = env.step(action)
-            episode_return += reward
+
+            if player == env.metadata['AI PLAYER']:
+                episode_return += reward
+            else:
+                episode_return -= reward
+
             replay.add(obs[0], action, reward, next_obs[0], done, player)
 
             if step >= TRAIN_START:
                 if step % TARGET_UPDATE_EVERY == 0:
                     target_model.set_weights(model.get_weights())
-                batch = replay.sample(BATCH_SIZE)
+                batch = replay.sample(BATCH_SIZE, choose_players=[env.metadata['AI PLAYER']])
                 loss = fit_batch(env, model, target_model, batch)
 
-            if step >= TRAIN_START and step % EVAL_EVERY == 0:
-                avg_win_return, avg_lose_return = evaluate(env, model)
+                if step % EVAL_EVERY == 0:
+                    avg_win_return, avg_lose_return = evaluate(env, model, opponentModel)
 
-                print(
-                    "avg_win_return {:.1f} , avg_lose_return {:.1f} ".format(
-                        avg_win_return,
-                        avg_lose_return
-                        ))
+                    print(
+                        "avg_win_return {:.1f} , avg_lose_return {:.1f} ".format(
+                            avg_win_return,
+                            avg_lose_return
+                            ))
 
             steps_after_logging += 1
 
@@ -232,12 +239,11 @@ def train(env, model, max_steps, name):
 
 def load_or_create_model(env, model_filename):
     if model_filename:
-        fullname = 'models/{}'.format(model_filename)
+        fullname = 'models/{}.h5'.format(model_filename)
         model = keras.models.load_model(fullname)
-        print('Loaded {}'.format(model_filename))
+        print('Loaded {}'.format(fullname))
     else:
         model = create_model(env)
-    model.summary()
     return model
 
 def set_seed(env, seed):
@@ -251,17 +257,17 @@ def main(play=False, model_name=None):
     env = connect_four_gym.FooEnv()
     set_seed(env, 0)
     model = load_or_create_model(env, model_name)
+    opponentModel = load_or_create_model(env, 'opponent')
 
     if play:
-        episode_win_return_sum, episode_lose_return_sum = evaluate(env, model, view=True, numGames=50)
+        episode_win_return_sum, episode_lose_return_sum = evaluate(env, model, opponentModel, view=True, numGames=50)
         print("Wins:{:.1f} Loses:{:.1f}".format(episode_win_return_sum, episode_lose_return_sum))
         env.close()
     else:
         max_steps = 120000
-        train(env, model, max_steps, None)
+        train(env, model, opponentModel, max_steps, None)
         if True:
             filename = save_model(model, EVAL_STEPS, name='test')
-            load_or_create_model(env, filename)
 
-main(play=False, model_name=None)
+main(play=True, model_name='test-100')
 

@@ -53,11 +53,17 @@ class ReplayBuffer(object):
             self._storage[self._next_idx] = data
         self._next_idx = (self._next_idx + 1) % self._max_size
 
-    def _encode_sample(self, indices):
+    def _encode_sample(self, indices, choose_players=None):
         goals, observations, actions, rewards, next_observations, dones, players = [], [], [], [], [], [], []
         for i in indices:
             data = self._storage[i]
             observation, action, reward, next_obs, done, player = data
+
+            # skip if player is not in choose list
+            if choose_players is not None:
+                if player not in choose_players:
+                    continue
+
             observations.append(np.array(observation, copy=False))
             actions.append(np.array(action, copy=False))
             rewards.append(reward)
@@ -66,7 +72,7 @@ class ReplayBuffer(object):
             players.append(player)
         return np.array(observations), np.array(actions), np.array(rewards), np.array(next_observations), np.array(dones), np.array(players)
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, choose_players=None):
         """Sample a batch of experiences.
         Parameters
         ----------
@@ -82,4 +88,4 @@ class ReplayBuffer(object):
         players: np.array
         """
         idxes = [random.randint(0, len(self._storage) - 1) for _ in range(batch_size)]
-        return self._encode_sample(idxes)
+        return self._encode_sample(idxes, choose_players=choose_players)
